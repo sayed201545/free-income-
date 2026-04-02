@@ -370,6 +370,14 @@
             animation: spin 1s linear infinite;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+        .error-message {
+            color: red;
+            background: #ffe0e0;
+            padding: 10px;
+            border-radius: 12px;
+            margin-top: 20px;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
@@ -493,29 +501,6 @@
 
     <script>
         (function(){
-            // ----- FIX for Telegram WebApp version 6.0: polyfill showPopup -----
-            if (window.Telegram && window.Telegram.WebApp) {
-                const tgWebApp = window.Telegram.WebApp;
-                if (!tgWebApp.showPopup) {
-                    tgWebApp.showPopup = function(params) {
-                        let message = params.message || params.title || 'Notification';
-                        if (params.buttons && params.buttons.length) {
-                            // Just use showAlert as fallback
-                            tgWebApp.showAlert(message);
-                        } else {
-                            tgWebApp.showAlert(message);
-                        }
-                    };
-                }
-                // Also ensure openLink is safe
-                if (!tgWebApp.openLink) {
-                    tgWebApp.openLink = function(url) {
-                        window.open(url, '_blank');
-                    };
-                }
-            }
-            // ----------------------------------------------------------------
-
             const tg = window.Telegram.WebApp;
             const firebaseConfig = {
                 apiKey: "AIzaSyB03K2JAA4iyBLgAX6Nv9Z0VMGX3qMGqBc",
@@ -524,7 +509,8 @@
                 projectId: "earnify-f3ac8",
                 storageBucket: "earnify-f3ac8.firebasestorage.app",
                 messagingSenderId: "273672601348",
-                appId: "1:273672601348:web:4d627b5689575857345a51"
+                appId: "1:273672601348:web:4d627b5689575857345a51",
+                measurementId: "G-9VTHYEVSVE"
             };
             firebase.initializeApp(firebaseConfig);
             const db = firebase.database();
@@ -578,13 +564,45 @@
                 } catch(e){ console.warn(e); }
             }
 
+            // FIXED: Load leaderboard without orderByChild (to avoid missing index error)
+            async function loadLeaderboard() {
+                try {
+                    const usersSnap = await db.ref('users').once('value');
+                    const users = [];
+                    usersSnap.forEach(child => users.push(child.val()));
+                    // Sort manually for referral
+                    const referralSorted = [...users].sort((a,b) => (b.referrals || 0) - (a.referrals || 0)).slice(0,10);
+                    // Sort manually for totalEarned
+                    const earningSorted = [...users].sort((a,b) => (b.totalEarned || 0) - (a.totalEarned || 0)).slice(0,10);
+                    leaderboardData.referral = referralSorted;
+                    leaderboardData.earning = earningSorted;
+                } catch(err) {
+                    console.warn("Leaderboard load error", err);
+                    leaderboardData.referral = [];
+                    leaderboardData.earning = [];
+                }
+            }
+
+            // Load Ad SDK
+            function loadAdSdk(zoneId) {
+                if (!zoneId) return;
+                if (document.querySelector(`script[data-zone='${zoneId}']`)) return;
+                const script = document.createElement('script');
+                script.src = `//libtl.com/sdk.js`;
+                script.setAttribute('data-zone', zoneId);
+                script.setAttribute('data-sdk', `show_${zoneId}`);
+                script.async = true;
+                document.body.appendChild(script);
+            }
+
             // Main Init
             async function initApp() {
-                tg.ready(); tg.expand();
-                document.body.className = `${tg.colorScheme}-theme`;
-                tgUser = tg.initDataUnsafe.user;
-                if(!tgUser?.id) { tg.showAlert("Error: No user data"); return; }
                 try {
+                    tg.ready(); tg.expand();
+                    document.body.className = `${tg.colorScheme}-theme`;
+                    tgUser = tg.initDataUnsafe.user;
+                    if(!tgUser?.id) { tg.showAlert("Error: No user data"); return; }
+                    
                     updateLoader(10);
                     const configSnap = await db.ref('config').once('value');
                     appConfig = configSnap.val() || {};
@@ -593,17 +611,22 @@
                     updateLoader(40);
                     await loadUserData();
                     updateLoader(60);
-                    await loadLeaderboard();
+                    await loadLeaderboard(); // safe now
                     updateLoader(70);
                     earningWallet = parseFloat(localStorage.getItem(`earningWallet_${tgUser.id}`) || '0');
+                    loadAdSdk(appConfig.adZoneId); // load ad SDK
                     updateLoader(85);
                     renderAll();
                     updateLoader(100);
                     document.getElementById('loader-screen').style.display = 'none';
                     document.getElementById('app').style.display = 'block';
                     await showPopupMessage();
-                    await sendAdminNotification(`🟢 New user joined: ${userState.firstName} ${userState.lastName} (${tgUser.id})`);
-                } catch(err){ console.error(err); tg.showAlert("Failed to load app. Try again."); }
+                    await sendAdminNotification(`🟢 User joined: ${userState.firstName} ${userState.lastName} (${tgUser.id})`);
+                } catch(err){
+                    console.error(err);
+                    const loaderDiv = document.getElementById('loader-screen');
+                    loaderDiv.innerHTML = `<div class="error-message"><i class="fas fa-exclamation-triangle"></i> Failed to load app: ${err.message || 'Unknown error'}<br><button onclick="location.reload()" class="action-btn" style="margin-top:15px;">Retry</button></div>`;
+                }
             }
 
             async function loadUserData(){
@@ -638,15 +661,6 @@
                 userState = data;
             }
 
-            async function loadLeaderboard(){
-                const referralSnap = await db.ref('users').orderByChild('referrals').limitToLast(10).once('value');
-                const earningSnap = await db.ref('users').orderByChild('totalEarned').limitToLast(10).once('value');
-                leaderboardData.referral = []; leaderboardData.earning = [];
-                referralSnap.forEach(c => leaderboardData.referral.push(c.val()));
-                earningSnap.forEach(c => leaderboardData.earning.push(c.val()));
-                leaderboardData.referral.reverse(); leaderboardData.earning.reverse();
-            }
-
             function renderAll(){
                 document.getElementById('user-photo').src = userState.photoUrl || 'https://via.placeholder.com/44';
                 document.getElementById('user-name').innerHTML = `${userState.firstName} ${userState.lastName}`;
@@ -664,7 +678,6 @@
                 renderReferralSection();
                 renderLeaderboardUI();
                 renderEarningsGraph();
-                renderDynamicLinks();
             }
 
             function renderAdProgress(){
@@ -826,8 +839,7 @@
                             }
                         };
                         window.addEventListener('blur', blurHandler);
-                        const cleanup = () => { window.removeEventListener('blur', blurHandler); };
-                        setTimeout(cleanup, 31000);
+                        setTimeout(() => window.removeEventListener('blur', blurHandler), 31000);
                     });
                 });
             }
@@ -924,18 +936,20 @@
 
             // Popup Message
             async function showPopupMessage(){
-                const popupData = await db.ref('config/popupMessage').once('value');
-                const data = popupData.val();
-                if(data && (data.title || data.description)){
-                    let linksHtml = '';
-                    if(data.links && data.links.length){
-                        linksHtml = `<div class="popup-link-group">` + data.links.map(l => `<a href="${l.url}" target="_blank" class="popup-link"><img src="${l.image}" width="50"><span>${l.name}</span></a>`).join('') + `</div>`;
+                try {
+                    const popupData = await db.ref('config/popupMessage').once('value');
+                    const data = popupData.val();
+                    if(data && (data.title || data.description)){
+                        let linksHtml = '';
+                        if(data.links && data.links.length){
+                            linksHtml = `<div class="popup-link-group">` + data.links.map(l => `<a href="${l.url}" target="_blank" class="popup-link"><img src="${l.image}" width="50"><span>${l.name}</span></a>`).join('') + `</div>`;
+                        }
+                        const popHtml = `<div class="popup-premium"><h2>${data.title||''}</h2><p>${data.description||''}</p>${linksHtml}<button class="action-btn close-modal" style="margin-top:20px;">Close</button></div>`;
+                        document.getElementById('global-popup-body').innerHTML = popHtml;
+                        showModal('global-popup');
+                        document.querySelector('#global-popup .close-modal')?.addEventListener('click', () => hideModal('global-popup'));
                     }
-                    const popHtml = `<div class="popup-premium"><h2>${data.title||''}</h2><p>${data.description||''}</p>${linksHtml}<button class="action-btn close-modal" style="margin-top:20px;">Close</button></div>`;
-                    document.getElementById('global-popup-body').innerHTML = popHtml;
-                    showModal('global-popup');
-                    document.querySelector('#global-popup .close-modal')?.addEventListener('click', () => hideModal('global-popup'));
-                }
+                } catch(e) { console.warn("Popup error", e); }
             }
 
             function renderReferralSection(){
@@ -976,12 +990,6 @@
                     chartDiv.innerHTML += `<div style="height:${height}%; width:12%; background:#E74C3C; border-radius:8px 8px 0 0; text-align:center; position:relative;"><span style="position:absolute; bottom:100%; left:0; font-size:10px;">${val}</span></div>`;
                     labelsDiv.innerHTML += `<span>${new Date(dates[i]).getDate()}</span>`;
                 });
-            }
-
-            function renderDynamicLinks(){
-                const links = appConfig.links ? Object.values(appConfig.links) : [];
-                const container = document.getElementById('dynamic-links-container');
-                if(container) container.innerHTML = '';
             }
 
             // Navigation
